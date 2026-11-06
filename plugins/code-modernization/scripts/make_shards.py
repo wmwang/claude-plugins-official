@@ -22,8 +22,8 @@ SOURCE_EXT = {
     '.java', '.kt', '.scala', '.groovy', '.cs', '.vb', '.vbs', '.bas', '.cls', '.frm', '.fs', '.c', '.h', '.cc', '.cpp', '.cxx', '.hpp', '.m', '.mm',
     '.go', '.rs', '.py', '.rb', '.php', '.pl', '.pm', '.js', '.jsx', '.ts', '.tsx', '.swift', '.lua', '.tcl', '.erl', '.ex', '.exs', '.clj',
     '.hs', '.ml', '.r', '.sh', '.bat', '.ps1',
-    # web and data
-    '.asp', '.aspx', '.ascx', '.cshtml', '.jsp', '.jspx', '.sql', '.pks', '.pkb', '.plsql', '.tf',
+    # web, desktop GUI and data
+    '.asp', '.aspx', '.ascx', '.cshtml', '.xaml', '.resx', '.jsp', '.jspx', '.sql', '.pks', '.pkb', '.plsql', '.tf',
 }
 SKIP_DIRS = {
     '.git', '.svn', '.hg', 'node_modules', 'vendor', 'third_party', 'thirdparty', 'dist', 'build', 'target', 'bin', 'obj', 'out',
@@ -157,6 +157,31 @@ def from_topology(topology, source, system, pattern):
     return shards, len(modules), escaped, total
 
 
+def form_stem(rel):
+    """Group paired GUI files (OrderForm.cs + OrderForm.Designer.cs + OrderForm.resx, Page.aspx + Page.aspx.cs, Window.xaml + Window.xaml.cs)
+    so a form's control tree and event handlers never split across two shards."""
+    low = rel.lower()
+    for suffix in ('.designer.cs', '.designer.vb', '.aspx.cs', '.aspx.vb', '.ascx.cs', '.ascx.vb', '.xaml.cs', '.xaml.vb',
+                   '.cs', '.vb', '.resx', '.aspx', '.ascx', '.xaml', '.frm'):
+        if low.endswith(suffix):
+            return low[: len(low) - len(suffix)]
+    return low
+
+
+def group_paired_files(entries):
+    """Pack [(rel, lines), ...] into inseparable units so paired GUI files stay together while preserving directory sort order."""
+    units, by_stem = [], {}
+    for item in entries:
+        stem = form_stem(item[0])
+        if stem in by_stem:
+            by_stem[stem].append(item)
+        else:
+            unit = [item]
+            by_stem[stem] = unit
+            units.append(unit)
+    return units
+
+
 def from_tree(source, pattern, include_all):
     by_dir, skipped = {}, {'vendored or generated': 0, 'tests': 0, 'unreadable or binary': 0, 'symbolic links': 0}
     for root, dirs, files in os.walk(source):
@@ -192,16 +217,18 @@ def from_tree(source, pattern, include_all):
         total += len(entries)
         chunk, chunk_loc, part = [], 0, 1
         label = directory or '.'
-        for rel, lines in entries + [(None, 0)]:
-            if rel is None or (chunk and (len(chunk) >= MAX_FILES or chunk_loc + lines > MAX_LOC)):
+        for unit in group_paired_files(entries) + [None]:
+            unit_files = len(unit) if unit else 0
+            unit_loc = sum(lines for _, lines in unit) if unit else 0
+            if unit is None or (chunk and (len(chunk) + unit_files > MAX_FILES or chunk_loc + unit_loc > MAX_LOC)):
                 if chunk:
                     shards.append({'name': label if part == 1 else f'{label}#{part}', 'domain': directory,
                                    'files': [f for f, _ in chunk], 'loc': chunk_loc or None})
                     part += 1
                 chunk, chunk_loc = [], 0
-            if rel is not None:
-                chunk.append((rel, lines))
-                chunk_loc += lines
+            if unit is not None:
+                chunk.extend(unit)
+                chunk_loc += unit_loc
     return shards, total, skipped, whole
 
 

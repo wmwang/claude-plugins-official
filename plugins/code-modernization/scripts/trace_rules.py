@@ -106,14 +106,17 @@ def find_ids(text):
 def class_keys(name):
     """The lower-case names a test class goes by in a result file, for matching a test file's name (without its extension): the last two
     parts of a dotted, slashed or $-nested name (a Python module and its class, a Java class), the outermost class of a nested one and,
-    for a file path, its file name with and without the extension."""
+    for a file path or multi-dot test filename (e.g. OrderForm.test.tsx), its file name with and without the extension."""
     text = str(name if name is not None else "")[:400]
     parts = [p for p in re.split(r"[.$:/\\]+", text) if p]
     outer = [p for p in re.split(r"[.:/\\]+", text.split("$")[0]) if p]
     keys = {p.lower() for p in parts[-2:] + outer[-1:]}
-    if "/" in text or "\\" in text:
-        base = re.split(r"[/\\]", text)[-1]
-        keys.update((base.lower(), os.path.splitext(base)[0].lower()))
+    base = re.split(r"[/\\]", text)[-1] if text else ""
+    if base:
+        stem = os.path.splitext(base)[0].lower()
+        keys.update((base.lower(), stem))
+        if "." in stem:
+            keys.add(os.path.splitext(stem)[0])
     return keys
 
 
@@ -202,11 +205,14 @@ def parse_rules(text):
         body = r.pop("body")
         prio = re.search(r"\bP\d\b", field(body, "Priority"))
         conf = re.search(r"(?i)\b(high|medium|low)\b", field(body, "Confidence"))
+        cat = clean(field(body, "Category"), 30)
+        layer = clean(field(body, "Target layer"), 30)
         row = rows.get(r["n"], {})
         source = field(body, "Source")
         first = PATH.search(source)
         r.update({"priority": prio.group(0) if prio else row.get("p", ""),
                   "confidence": conf.group(1).capitalize() if conf else row.get("c", "").capitalize()[:10],
+                  "category": cat, "targetLayer": layer,
                   "source": clean(source, 160), "sourceFile": os.path.basename(first.group(0)) if first else ""})
     return rules, notes
 
@@ -397,7 +403,8 @@ def trace(workspace, system, ran=None):
         slots = per[r["n"]]
         main, tests_n = sum(s["main"] for s in slots.values()), sum(s["tests"] for s in slots.values())
         claim = any(s["claimed"] for s in slots.values())
-        out.append({"id": r["id"], "name": r["name"], "priority": r["priority"], "confidence": r["confidence"], "source": r["source"],
+        out.append({"id": r["id"], "name": r["name"], "priority": r["priority"], "confidence": r["confidence"],
+                    "category": r.get("category", ""), "targetLayer": r.get("targetLayer", ""), "source": r["source"],
                     "main": main, "tests": tests_n, "claimed": claim, "status": status_of(main, tests_n, claim, any(s["by"] for s in slots.values())),
                     "perModule": slots, "samples": samples[r["n"]]})
     if scan["cut"]:

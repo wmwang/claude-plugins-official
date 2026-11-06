@@ -98,20 +98,21 @@ and `cases.json` are the development cases: never touch them.
    output. If a side legitimately writes no file, save an empty one so a person can approve the difference. If the legacy refuses an
    input, find out why (run its loader by hand), leave it out and list it in `leftOut` with the reason. On a re-run keep
    `fresh-cases.json` and any `approvedDifference` a person added; add new inputs. **If the legacy cannot run here, say so plainly:**
-   the proof is then trace-based and the verdict cannot be PROVEN.
+   for a non-GUI system the proof is trace-based and the verdict cannot be PROVEN; for a **GUI-to-Web/API split** (e.g. WinForms `.cs` + `.Designer.cs` split into React + TypeScript & Spring Boot), set `"guiSplit": true` in `test-runs.json` and verify through the GUI-split checks (both backend JUnit XML and frontend Vitest JUnit XML suites passing, all P0 rules and `UI-State`/`UI-Flow` rules backed by passing tests, a `GUI Workflow & Split Mapping` table in `TRANSFORMATION_NOTES.md`, at least 10 boundary/edge/negative/UI-workflow tests passing in the XML results, and canary runs proving the suites fail when broken).
 
 ## 5 — Record it and write the proof pack
 
 The pack checks by itself that `legacy/` is untouched (file times against `PREFLIGHT.md`; no version-control tool is run) and lists the
 brief's unticked §7 questions and exit criteria; a person decides those, so never tick one. Write
-`analysis/$system/equivalence/test-runs.json` once, from what you did in steps 3 and 4 (paths and words only):
+`analysis/$system/equivalence/test-runs.json` once, from what you did in steps 3 and 4 (paths and words only; add `"guiSplit": true` when verifying a GUI-to-Web/API split module):
 
 ```json
 { "date": "YYYY-MM-DD",
+  "guiSplit": false,
   "legacy": { "ran": true, "how": "one line: how the legacy runs here", "why": "" },
   "leftOut": [ "F17: the legacy loader refused it (duplicate keys)" ],
   "suites": [ { "module": "<module>", "name": "unit tests", "command": "<the exact command>",
-                "junit": ["<the result folder: modernized/$system/<module>/target/surefire-reports, or for an uplift modernized/$system-uplifted/<unit>/target/surefire-reports>"],
+                "junit": ["<the result folder: modernized/$system/<module>/target/surefire-reports, or for a GUI split both backend/target/surefire-reports and frontend/test-results>"],
                 "log": ["analysis/$system/equivalence/unit.test-output.txt"], "skippedReason": "", "note": "" } ],
   "canaries": [ { "module": "<module>", "change": "<what you broke>",
                  "junit": ["analysis/$system/equivalence/canary/<module>"], "log": [] } ] }

@@ -22,12 +22,18 @@ For **architecture proposals**:
 
 For **transformed code**:
 - Is this idiomatic for the target stack, or is legacy structure leaking
-  through? (Flag "JOBOL" — procedural Java with COBOL variable names.)
+  through? (Flag "JOBOL" — procedural Java with COBOL variable names, or "C#-in-Java" / WinForms event-handler spaghetti inside a Spring `@Service`.)
 - Is error handling meaningful or ceremonial?
 - Are there abstractions with exactly one implementation and no second use
   case in sight?
 - Does the test suite actually pin behavior, or just exercise code paths?
 - What would the on-call engineer need at 3am that isn't here?
+
+For **GUI-to-Web/API split transformations (e.g., WinForms / WebForms -> React + TypeScript & Spring Boot)**:
+- **Stateful Form leak into Stateless Spring Beans (Blocker)**: Did the rewrite accidentally move WinForms form-level member variables (`private DataSet _currentData`, `_selectedAccountId`) into fields of a singleton Spring `@Service` or `@RestController`, creating cross-request concurrency corruption?
+- **Operator Workflow & UI-State completeness**: Does every legacy GUI event (`Form_Load`, `SelectedIndexChanged`, `Validating`, `btn_Click`, `MessageBox.Show` Yes/No branches, `ShowDialog` modal handoffs) have an explicit home in the React component state/hooks and/or Spring Boot endpoint? Flag any dropped confirmation step or field-reactivity rule (`UI-State` / `UI-Flow`).
+- **Frontend/Backend boundary integrity**: Are core business calculations and security/validation guards (`Calculation`, `Validation`, `Policy`) enforced in the Spring Boot backend (never only in React client code), while pure control reactivity (`UI-State`) stays cleanly in React state without chatty round-trips?
+- **Contract & precision alignment**: Do React TypeScript interfaces and Spring Boot DTOs agree on field names, nullability, monetary precision (`BigDecimal` serialized safely without IEEE-754 float drift), and validation error shapes?
 
 ## Secret handling (mandatory)
 

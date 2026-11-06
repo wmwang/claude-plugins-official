@@ -48,6 +48,23 @@ If `analysis/<system>/RULE_REVIEWS.json` exists, honor it: a rule a person marke
 an oracle (write the test from the reviewer's note, or ask what is right), and a P0 rule marked
 `discuss` is not settled: raise it instead of guessing.
 
+## GUI-to-Web/API Split Testing (WinForms / WPF / WebForms -> React + Spring Boot)
+
+When a legacy GUI module (where View and business logic are mixed in form event handlers like `.cs` + `.Designer.cs`) is split into a modern **Frontend (React + TypeScript)** and **Backend (Java Spring Boot REST API)**, you must write a **dual-track test suite** that pins both backend logic and frontend operator workflows:
+
+1. **Backend Characterization & Contract Suite (`backend/src/test/java/...`, JUnit 5 + MockMvc)**:
+   - Pin every `Backend` and `Full-Stack` rule (`Calculation`, `Validation`, `Lifecycle`, `Policy`).
+   - Assert exact numeric outputs (rounding modes, `BigDecimal` scale), state transitions, validation error responses, and REST API contract payloads.
+   - Include at least 10 boundary, edge, and malformed-input cases (zero, negative, threshold±1, empty, null/missing fields) named with `boundary` / `edge` / `invalid` and the `RULE-NNN` id.
+2. **Frontend UI-State & Operator Workflow Suite (`frontend/src/__tests__/...test.tsx`, Vitest + React Testing Library `userEvent` / Playwright)**:
+   - Pin every `Frontend` and `Full-Stack` rule (`UI-State` and `UI-Flow`).
+   - **Test the step-by-step operator journey (`UI-Flow`)**: simulate the exact user sequence (`userEvent.selectOptions`, `userEvent.type`, `userEvent.tab`, `userEvent.click`) and assert confirmation modal branches (clicking Cancel aborts the API call; clicking Confirm dispatches the exact REST payload and transitions the screen).
+   - **Test control reactivity (`UI-State`)**: assert initial control states on load (`toBeDisabled()`, `toHaveAttribute('readonly')`, `toHaveValue(...)`) and dynamic field updates when a parent field changes.
+   - Configure Vitest to emit JUnit XML (`vitest run --reporter=junit --outputFile=test-results/vitest-junit.xml`) so `trace_rules.py` and `proof_pack.py` can parse every executed frontend test alongside Maven's Surefire XML.
+3. **Dual Canary Verification**:
+   - Prove the backend JUnit suite fails when a one-line calculation or validation in Spring Boot is broken.
+   - Prove the frontend Vitest suite fails when a one-line control reactivity condition or workflow guard in React is broken.
+
 ## Secret handling (mandatory)
 
 Never copy credential-like literals — passwords, API keys, tokens,

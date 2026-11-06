@@ -15,7 +15,7 @@ import os
 import re
 import sys
 
-CATEGORIES = ['Calculation', 'Validation', 'Lifecycle', 'Policy']
+CATEGORIES = ['Calculation', 'Validation', 'Lifecycle', 'Policy', 'UI-State', 'UI-Flow']
 PRIORITY = {'P0': 0, 'P1': 1, 'P2': 2}
 
 
@@ -57,8 +57,12 @@ def render_rule(number, rule):
     source, also = split_citation(rule.get('source'))
     out = [f"### {rid}: {one_line(rule.get('name'), 120)}",
            f"**Category:** {one_line(rule.get('category'), 20)}",
-           f"**Priority:** {one_line(rule.get('priority'), 4)}",
-           f"**Source:** `{source.replace(chr(39), '')}`"]
+           f"**Priority:** {one_line(rule.get('priority'), 4)}"]
+    if rule.get('targetLayer'):
+        out.append(f"**Target layer:** {one_line(rule.get('targetLayer'), 30)}")
+    if rule.get('uiMapping'):
+        out.append(f"**UI mapping:** {one_line(rule.get('uiMapping'), 300)}")
+    out.append(f"**Source:** `{source.replace(chr(39), '')}`")
     if also:
         out.append(f'**Also cited:** {also}')
     out += [f"**Plain English:** {one_line(rule.get('plainEnglish'), 400)}",

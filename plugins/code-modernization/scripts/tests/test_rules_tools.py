@@ -129,6 +129,25 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(done.returncode, 1)
             self.assertIn('preflight', done.stderr)
 
+    def test_winforms_paired_files_never_split_across_shards(self):
+        with tempfile.TemporaryDirectory() as ws:
+            # 24 standalone files + a 3-file WinForms unit (Form.cs, Form.Designer.cs, Form.resx) = 27 files (> MAX_FILES=25)
+            for i in range(24):
+                write(ws, f'legacy/win/Forms/A{i:02d}.cs', 'a\n' * 10)
+            write(ws, 'legacy/win/Forms/ZOrderForm.cs', 'a\n' * 20)
+            write(ws, 'legacy/win/Forms/ZOrderForm.Designer.cs', 'a\n' * 30)
+            write(ws, 'legacy/win/Forms/ZOrderForm.resx', '<root/>\n' * 5)
+            done = run('make_shards.py', 'win', '--workspace', ws)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            shards = load(os.path.join(ws, 'analysis/win/extract-rules.modules.json'))
+            self.assertEqual(len(shards), 2)
+            z_shards = [s['name'] for s in shards if any('ZOrderForm' in f for f in s['files'])]
+            self.assertEqual(len(z_shards), 1, 'ZOrderForm.cs, .Designer.cs, and .resx must stay in the same shard')
+            self.assertEqual(
+                sorted(f for f in shards[1]['files'] if 'ZOrderForm' in f),
+                ['Forms/ZOrderForm.Designer.cs', 'Forms/ZOrderForm.cs', 'Forms/ZOrderForm.resx'],
+            )
+
 
 class RenderTests(unittest.TestCase):
     def test_rules_render_with_rule_headings_and_hostile_text_stays_inert(self):
@@ -190,6 +209,97 @@ class RenderTests(unittest.TestCase):
     def test_unreadable_result_is_an_error(self):
         with tempfile.TemporaryDirectory() as ws:
             self.assertEqual(run('render_rules.py', 's', '--workspace', ws).returncode, 1)
+
+    def test_gui_split_categories_and_verification_reach_proven(self):
+        result = {'confirmedRules': [
+            {'name': 'Foreign exchange discount calculation', 'category': 'Calculation', 'priority': 'P0',
+             'targetLayer': 'Backend', 'uiMapping': 'OrderForm.btnSubmit_Click -> OrderPage -> POST /api/orders',
+             'source': 'Forms/OrderForm.cs:40-65', 'plainEnglish': 'Calculates USD discount.',
+             'given': 'USD order > 1000', 'when': 'submitted', 'then': '5% discount applied', 'confidence': 'High'},
+            {'name': 'Currency selection enables exchange rate field', 'category': 'UI-State', 'priority': 'P0',
+             'targetLayer': 'Frontend', 'uiMapping': 'OrderForm.cboCurrency_SelectedIndexChanged -> OrderForm.tsx (isFxEditable)',
+             'source': 'Forms/OrderForm.Designer.cs:110-145', 'plainEnglish': 'Selecting USD unlocks exchange rate input.',
+             'given': 'Currency is TWD', 'when': 'user selects USD', 'then': 'txtExchangeRate becomes editable', 'confidence': 'High'},
+            {'name': 'High amount order confirmation dialog workflow', 'category': 'UI-Flow', 'priority': 'P0',
+             'targetLayer': 'Full-Stack', 'uiMapping': 'OrderForm.btnSubmit_Click MessageBox -> ConfirmDialog.tsx -> POST /api/orders',
+             'source': 'Forms/OrderForm.cs:70-98', 'plainEnglish': 'Orders above 10,000 require modal confirmation.',
+             'given': 'Order total is 15000', 'when': 'operator clicks Submit', 'then': 'confirm modal opens before API call', 'confidence': 'High'}
+        ]}
+        with tempfile.TemporaryDirectory() as ws:
+            write(ws, 'legacy/win/Forms/OrderForm.cs', '// legacy code\n')
+            write(ws, 'analysis/win/PREFLIGHT.md', '# Preflight\n')
+            write(ws, 'analysis/win/rules_result.json', json.dumps(result))
+            self.assertEqual(run('render_rules.py', 'win', '--workspace', ws).returncode, 0)
+            with open(os.path.join(ws, 'analysis/win/BUSINESS_RULES.md'), encoding='utf-8') as fh:
+                rules_md = fh.read()
+            self.assertIn('## UI-State', rules_md)
+            self.assertIn('## UI-Flow', rules_md)
+            self.assertIn('**Target layer:** Frontend', rules_md)
+            self.assertIn('**UI mapping:** OrderForm.cboCurrency_SelectedIndexChanged', rules_md)
+
+            # Build modernized GUI-split module (backend Spring Boot + frontend React)
+            write(ws, 'modernized/win/order/backend/src/main/java/OrderService.java', '// RULE-001\nclass OrderService {}\n')
+            write(ws, 'modernized/win/order/backend/src/test/java/OrderServiceTest.java', '// RULE-001\nclass OrderServiceTest {}\n')
+            write(ws, 'modernized/win/order/frontend/src/components/OrderForm.tsx', '// RULE-002 RULE-003\nexport function OrderForm() {}\n')
+            write(ws, 'modernized/win/order/frontend/src/__tests__/OrderForm.test.tsx', '// RULE-002 RULE-003\n')
+            write(ws, 'modernized/win/order/TRANSFORMATION_NOTES.md',
+                  '# Notes\n## GUI Workflow & Split Mapping\n| Legacy Form.Control | Rule | React | API |\n|---|---|---|---|\n'
+                  '| OrderForm.Designer.cs cboCurrency_SelectedIndexChanged | RULE-002 | OrderForm.tsx | POST /api/orders |\n')
+
+            # Backend JUnit XML (RULE-001 + 6 boundary/edge cases)
+            be_cases = ['<testcase classname="com.acme.OrderServiceTest" name="rule001_fxDiscountCalculation" time="0.01"/>'] + [
+                f'<testcase classname="com.acme.OrderServiceTest" name="rule001_boundary_case_{i}" time="0.01"/>' for i in range(6)
+            ]
+            write(ws, 'analysis/win/equivalence/junit-backend.xml',
+                  f'<testsuite name="OrderServiceTest" tests="7" failures="0">{"".join(be_cases)}</testsuite>\n')
+
+            # Frontend Vitest JUnit XML (RULE-002, RULE-003 + 6 UI-flow/state/dialog edge cases)
+            fe_cases = [
+                '<testcase classname="OrderForm.test.tsx" name="RULE-002: ui_state currency change unlocks rate input" time="0.02"/>',
+                '<testcase classname="OrderForm.test.tsx" name="RULE-003: ui_flow confirm modal blocks API on cancel" time="0.02"/>',
+            ] + [
+                f'<testcase classname="OrderForm.test.tsx" name="ui_flow_dialog_edge_case_{i}" time="0.01"/>' for i in range(6)
+            ]
+            write(ws, 'analysis/win/equivalence/junit-frontend.xml',
+                  f'<testsuite name="OrderForm.test.tsx" tests="8" failures="0">{"".join(fe_cases)}</testsuite>\n')
+
+            # Canary XML (shows a failure when broken)
+            write(ws, 'analysis/win/equivalence/canary-backend.xml',
+                  '<testsuite name="OrderServiceTest" tests="1" failures="1">'
+                  '<testcase classname="com.acme.OrderServiceTest" name="rule001_fxDiscountCalculation"><failure message="broken"/></testcase>'
+                  '</testsuite>\n')
+
+            test_runs = {
+                'date': '2026-11-06',
+                'guiSplit': True,
+                'legacy': {'ran': False, 'how': '', 'why': 'WinForms desktop GUI (.exe)'},
+                'suites': [
+                    {'module': 'order', 'name': 'backend-junit', 'command': 'mvn test',
+                     'junit': ['analysis/win/equivalence/junit-backend.xml'], 'log': []},
+                    {'module': 'order', 'name': 'frontend-vitest', 'command': 'npx vitest run --reporter=junit',
+                     'junit': ['analysis/win/equivalence/junit-frontend.xml'], 'log': []},
+                ],
+                'canaries': [
+                    {'module': 'order', 'change': 'flipped discount rate in OrderService.java',
+                     'junit': ['analysis/win/equivalence/canary-backend.xml'], 'log': []}
+                ],
+            }
+            write(ws, 'analysis/win/equivalence/test-runs.json', json.dumps(test_runs))
+
+            done = run('proof_pack.py', 'win', 'order', '--workspace', ws)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            ver = load(os.path.join(ws, 'analysis/win/VERIFICATION.json'))
+            self.assertEqual(ver['overall']['verdict'], 'PROVEN')
+            self.assertEqual(ver['modules'][0]['verdict'], 'PROVEN')
+            self.assertEqual(ver['modules'][0]['evidence']['rules']['uiRulesTested'], 2)
+
+            # Negative check: if GUI Workflow Mapping is missing from TRANSFORMATION_NOTES.md, Same behavior drops to gap (PARTLY PROVEN)
+            write(ws, 'modernized/win/order/TRANSFORMATION_NOTES.md', '# Notes without GUI mapping\n')
+            done_gap = run('proof_pack.py', 'win', 'order', '--workspace', ws)
+            self.assertEqual(done_gap.returncode, 1)
+            ver_gap = load(os.path.join(ws, 'analysis/win/VERIFICATION.json'))
+            self.assertEqual(ver_gap['overall']['verdict'], 'PARTLY PROVEN')
+            self.assertTrue(any('GUI Workflow & Split Mapping' in r for r in ver_gap['modules'][0]['reasons']))
 
 
 if __name__ == '__main__':

@@ -39,7 +39,16 @@ one and whose `Modules:` include `$module`, and treat its scope, entry criteria,
 edits the user made as binding. An unmet entry criterion is the next step: meet it, never re-plan
 around it. If no phase covers `$module`, stop and ask which phase this is.
 
-Read the module's source and the rules in `BUSINESS_RULES.md` that reference it, and any verdicts on them in `analysis/$system/RULE_REVIEWS.json`: a rule marked `wrong` is not pinned as the oracle (use the reviewer's note for what is right, and if the note does not say, ask), and a P0 rule marked `discuss` is a question to settle at this plan gate before any code. Then present the
+Read the module's source and the rules in `BUSINESS_RULES.md` that reference it, and any verdicts on them in `analysis/$system/RULE_REVIEWS.json`: a rule marked `wrong` is not pinned as the oracle (use the reviewer's note for what is right, and if the note does not say, ask), and a P0 rule marked `discuss` is a question to settle at this plan gate before any code.
+
+**GUI-to-Web/API Split Mode (when legacy is WinForms / WPF / WebForms / desktop GUI and target splits into Frontend + Backend, e.g. React + TypeScript & Java Spring Boot):**
+- Check **both** toolchains in Step 0 (`java -version` + `mvn -v`/`gradle -v` AND `node -v` + `npm -v`).
+- Output splits cleanly under `modernized/$system/$module/`:
+  - `backend/`: idiomatic Spring Boot REST API (`@RestController`, `@Service`, DTOs, validation, `src/test/java/` JUnit 5 suite)
+  - `frontend/`: idiomatic React + TypeScript UI (`src/components/`, `src/hooks/`, API client, `src/__tests__/` Vitest + Testing Library `userEvent` suite configured with `--reporter=junit --outputFile=test-results/vitest-junit.xml`)
+- Include a **GUI Workflow & Split Mapping** in your plan: how each legacy Form control, initial state (`Form_Load`), field reactivity (`SelectedIndexChanged`, `TextChanged`), confirmation dialog (`MessageBox.Show`), and button event (`btn_Click`) maps to React state/hooks and stateless Spring Boot endpoints.
+
+Then present the
 plan and **stop: write no code until the user explicitly approves** (plan mode if available): which
 source files are in scope, the target structure, which rules and behaviors it implements, how you will
 prove equivalence, and anything ambiguous that needs a human decision now.
@@ -49,31 +58,31 @@ prove equivalence, and anything ambiguous that needs a human decision now.
 Spawn the **test-engineer** subagent: "Write characterization tests for module $module of legacy/$system.
 Read the source, identify every observable behavior and encode each as a test with concrete input and
 expected output derived from the legacy logic. Target framework: <right for $target_stack>. Write to
-`modernized/$system/$module/src/test/`. These tests define 'done'. Name the `RULE-NNN` id(s) each test pins
+`modernized/$system/$module/src/test/` (or for a GUI-to-Web/API split: backend JUnit 5 tests in `modernized/$system/$module/backend/src/test/` for `Calculation`/`Validation`/`Lifecycle`/`Policy` rules plus at least 10 boundary/edge/invalid cases, AND frontend Vitest + Testing Library `userEvent` workflow tests in `modernized/$system/$module/frontend/src/__tests__/` for `UI-State` field reactivity and `UI-Flow` step-by-step operator journeys/dialogs, configured to output JUnit XML). These tests define 'done'. Name the `RULE-NNN` id(s) each test pins
 (from `analysis/$system/BUSINESS_RULES.md`) in its name or a one-line comment, so the trace can find it. Follow your secret-handling rules:
 no credential from legacy code becomes a fixture; use fake same-shape values and read anything live
-from environment variables." Show the user the test file and get a yes before going on.
+from environment variables." Show the user the test file(s) and get a yes before going on.
 
 ## Step 2 — Idiomatic transformation
 
-Write the implementation in `modernized/$system/$module/src/main/`. **Write what a senior
+Write the implementation in `modernized/$system/$module/src/main/` (or `backend/src/main/` and `frontend/src/` for a GUI-to-Web/API split). **Write what a senior
 $target_stack engineer would write from the *specification*, not from the legacy structure:** do not
-mirror COBOL paragraphs as methods or keep names like `WS-TEMP-AMT-X`; use the target's idioms
-(records, streams, injection, proper error types). Include the domain model, service logic, API
-surface and configuration, and link each class to the rule IDs it implements in a short comment.
+mirror COBOL paragraphs as methods, keep names like `WS-TEMP-AMT-X`, or leak stateful WinForms form member variables into singleton Spring `@Service` beans; use the target's idioms
+(records, streams, injection, proper error types; for React + Spring Boot splits: stateless REST controllers, `BigDecimal` for money, typed React hooks/components, and explicit confirmation modals/field reactivity matching every `UI-State` and `UI-Flow` rule). Include the domain model, service logic, API
+surface, UI components (when splitting a GUI) and configuration, and link each class/component to the rule IDs it implements in a short comment.
 
 ## Step 3 — Prove it, and prove the proof can fail
 
 While iterating, run only this module's tests; run the whole suite once before Step 4.
 
-1. **Run the tests** (`cd modernized/$system/$module` and the stack's test command) and show the
+1. **Run the tests** (`cd modernized/$system/$module` and the stack's test command; for a GUI split, run both the backend Maven/Gradle JUnit suite and the frontend Vitest JUnit-XML suite) and show the
    output. Fix and rerun until green.
 2. **Count what ran.** Report `equivalence cases executed: N`. A run that executed **zero** cases proved
    nothing, and a comparison test must **fail, never skip,** when its legacy oracle or fixture is
    missing: a suite that is green because everything skipped is not green. If the oracle was
    unreachable, fix that; do not report the suite as passing.
 3. **Show the tests can fail.** Temporarily break the new code in one small way that matters (change a
-   rounding mode, shift a threshold by one, flip a comparison), confirm at least one test goes red,
+   rounding mode, shift a threshold by one, flip a comparison; for a GUI split, run **two canaries**: one breaking a backend business rule in Spring Boot and one breaking a frontend `UI-State`/`UI-Flow` reactivity or dialog guard in React), confirm at least one test goes red for each,
    restore it, and record `Canary: <the change> → <N> tests failed` in the notes. If nothing failed,
    the tests do not pin the behavior: strengthen them before going on.
 4. **When the legacy code can run here**, also run both systems on the same inputs, save each output
@@ -91,8 +100,8 @@ While iterating, run only this module's tests; run the whole suite once before S
 ## Step 4 — Notes and a side-by-side
 
 Write `modernized/$system/$module/TRANSFORMATION_NOTES.md`: a mapping table (legacy file:lines to target
-file:lines, per behavior); deliberate deviations with rationale; what was NOT migrated (dead code,
-unreachable branches) and why; the canary result and the executed-case count; follow-ups for the next
+file:lines, per behavior; for a GUI-to-Web/API split, also include a `## GUI Workflow & Split Mapping` table with columns `| Legacy Form.Control / Event | Rule ID | React Component / State | Spring Boot Endpoint | Verified By Test |`); deliberate deviations with rationale; what was NOT migrated (dead code,
+unreachable branches) and why; the canary result(s) and the executed-case count; follow-ups for the next
 dependent module. Show one representative behavior side by side
 (`diff -y --width=160 <(sed -n '<lines>p' <legacy file>) <target file>`). Never pick a credential-bearing
 range, and mask any credential-like literal in the notes: they live in `modernized/` and get committed.

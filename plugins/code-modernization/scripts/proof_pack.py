@@ -144,7 +144,7 @@ def inside(workspace, rel):
 def load_test_runs(adir):
     """-> the validated content of equivalence/test-runs.json (everything defaulted when it is absent or malformed)."""
     obj, problem = read_json(os.path.join(adir, "equivalence", "test-runs.json"))
-    out = {"present": isinstance(obj, dict), "problems": [problem] if problem else [], "date": "", "legacy": {"ran": None, "how": "", "why": ""}, "suites": [], "canaries": [], "leftOut": []}
+    out = {"present": isinstance(obj, dict), "problems": [problem] if problem else [], "date": "", "guiSplit": False, "legacy": {"ran": None, "how": "", "why": ""}, "suites": [], "canaries": [], "leftOut": []}
     if not isinstance(obj, dict):
         if obj is not None:
             out["problems"].append("test-runs.json is not a JSON object, so it was not used.")
@@ -152,6 +152,7 @@ def load_test_runs(adir):
     out["date"] = clean(obj.get("date"), 40)
     out["leftOut"] = [clean(v, 200) for v in (obj.get("leftOut") if isinstance(obj.get("leftOut"), list) else [])[:20] if isinstance(v, str) and v.strip()]
     lg = obj.get("legacy") if isinstance(obj.get("legacy"), dict) else {}
+    out["guiSplit"] = bool(obj.get("guiSplit") is True or lg.get("guiSplit") is True)
     out["legacy"] = {"ran": lg.get("ran") if isinstance(lg.get("ran"), bool) else None, "how": clean(lg.get("how"), 300), "why": clean(lg.get("why"), 300)}
     for s in (obj.get("suites") if isinstance(obj.get("suites"), list) else [])[:200]:
         if isinstance(s, dict):
@@ -451,16 +452,38 @@ def recorded_matches(path, rec):
     return all(obj["totals"].get(k) == mine[k] for k in ("cases", "executed", "same", "differs", "differsApproved", "missing"))
 
 
-def check_tests(g, uplift, comparable):
+GUI_EDGE_RE = re.compile(r"(?i)(?:boundary|edge|invalid|empty|malformed|negative|error|overflow|limit|fresh|ui[-_]?flow|ui[-_]?state|dialog|confirm|disabled|readonly|modal|reject)")
+GUI_MAP_RE = re.compile(r"(?i)(?:gui\s+workflow|ui\s+mapping|split\s+mapping|\.designer\.cs|selectedindexchanged|textchanged|form_load|btn\w*_click|messagebox|showdialog)")
+
+
+def is_gui_split(ctx, subject):
+    """True when the run or module is a GUI-to-Web/API split (e.g. WinForms -> React + Spring Boot)."""
+    if subject["track"] == "uplift":
+        return False
+    if ctx["runs"].get("guiSplit"):
+        return True
+    return trace_rules.is_real_dir(os.path.join(subject["path"], "backend")) and trace_rules.is_real_dir(os.path.join(subject["path"], "frontend"))
+
+
+def gui_split_mapping_present(subject):
+    """True when TRANSFORMATION_NOTES.md (or UI_WORKFLOW_MAPPING.md) documents the GUI control/event -> Frontend -> Backend API mapping."""
+    for name in ("TRANSFORMATION_NOTES.md", "UI_WORKFLOW_MAPPING.md"):
+        text = read_text(os.path.join(subject["path"], name))
+        if text and "|" in text and GUI_MAP_RE.search(text):
+            return True
+    return False
+
+
+def check_tests(g, uplift, comparable, gui_split=False):
     """Check 1. g: {executed, failed, skipped, skippedNoReason, suites, stale}. A suite's own note is added to the detail."""
-    r = check_tests_state(g, uplift, comparable)
+    r = check_tests_state(g, uplift, comparable, gui_split)
     notes = " ".join(e["note"] for e in g["suites"] if e.get("note"))
     if notes:
         r["detail"] = clean(r["detail"] + " Note: " + notes, 700)
     return r
 
 
-def check_tests_state(g, uplift, comparable):
+def check_tests_state(g, uplift, comparable, gui_split=False):
     ex, fail, skip, nr = g["executed"], g["failed"], g["skipped"], g["skippedNoReason"]
     if not g["suites"]:
         return row("tests", "fail", "No test run is recorded for this module, so nothing executed. Run its tests again and record them in equivalence/test-runs.json.")
@@ -478,11 +501,13 @@ def check_tests_state(g, uplift, comparable):
     typed = [e["name"] or "a suite" for e in g["suites"] if e["source"] == "reported"]
     if unread or typed:
         return row("tests", "gap", "%d test(s) executed, but the counts for %s were typed in by the command, not read from a result file or a saved runner log, so this cannot be PROVEN." % (ex, ", ".join(unread + typed)))
+    if gui_split and not g.get("dualStackVerified"):
+        return row("tests", "gap", "%d test(s) executed, but GUI-split mode requires parsed result files from both the backend suite (JUnit) and the frontend UI-workflow suite (Vitest/Playwright)." % ex)
     judged = " (failures are judged against the baseline below)" if fail and uplift else ""
     return row("tests", "pass", "%d test(s) executed, %d failed%s, %d skipped." % (ex, fail, judged, skip))
 
 
-def check_rules(ctx, subject, evidence, caveats):
+def check_rules(ctx, subject, evidence, caveats, gui_split=False):
     """Check 2."""
     if subject["track"] == "uplift":
         return row("rules", "na", "An uplift keeps the code, so no business rule is traced. The baseline comparison stands in.")
@@ -493,11 +518,14 @@ def check_rules(ctx, subject, evidence, caveats):
         return row("rules", "gap", "BUSINESS_RULES.md has no rule cards in the form '### RULE-001: name', so no rule can be traced.")
     view = trace_rules.module_view(tr, subject["rel"])
     p0 = [r for r in view["rows"] if r["priority"] == "P0"]
+    ui_rules = [r for r in view["rows"] if r.get("category") in ("UI-State", "UI-Flow") or r.get("targetLayer") in ("Frontend", "Full-Stack")]
+    ui_tested = [r for r in ui_rules if r["status"] == "tested"]
     missing = [r["id"] for r in p0 if r["status"] != "tested"]
     unrun = [r["id"] for r in p0 if r["status"] == trace_rules.NOT_RUN]
     known = bool((ctx["ran"].get(subject["rel"]) or trace_rules.NO_RUN).get("known"))
     evidence["rules"] = {"tied": view["tied"], "counted": len(view["rows"]), "outOfScope": view["outOfScope"], "totals": view["totals"], "p0NoTests": missing, "namedNotRun": unrun[:100], "perTestResults": known,
-                         "p0": [{"id": r["id"], "name": r["name"], "confidence": r["confidence"], "status": r["status"], "main": r["main"], "tests": r["tests"], "claimed": r["claimed"], "by": r["by"],
+                         "uiRulesCount": len(ui_rules), "uiRulesTested": len(ui_tested),
+                         "p0": [{"id": r["id"], "name": r["name"], "confidence": r["confidence"], "category": r.get("category", ""), "status": r["status"], "main": r["main"], "tests": r["tests"], "claimed": r["claimed"], "by": r["by"],
                                  "where": clean(r["at"] or (r["samples"]["tests"] or r["samples"]["main"] or [""])[0], 200)} for r in p0][:100]}
     if not view["tied"]:
         caveats.append("Nothing ties a rule to this module by name, so every rule in BUSINESS_RULES.md was counted.")
@@ -514,6 +542,10 @@ def check_rules(ctx, subject, evidence, caveats):
             claimed = sum(1 for r in other if r["status"] == "claimed only")
             say.append("%d of %d P0 rule(s) are not named by any test: %s%s." % (len(other), len(p0), ", ".join(r["id"] for r in other[:12]), " (%d claimed only in the notes)" % claimed if claimed else ""))
         return row("rules", "gap", " ".join(say))
+    if gui_split and not ui_tested:
+        return row("rules", "gap", "All %d P0 rule(s) are tested, but GUI-split mode requires at least one tested UI-State or UI-Flow rule pinning the legacy GUI operator workflow." % len(p0))
+    if gui_split:
+        return row("rules", "pass", "All %d P0 rule(s) and %d GUI workflow/state rule(s) (UI-State / UI-Flow) this module answers for are backed by a test that ran and passed." % (len(p0), len(ui_tested)))
     return row("rules", "pass", "All %d P0 rule(s) this module answers for are backed by a test that ran and passed." % len(p0))
 
 
@@ -625,7 +657,7 @@ def check_deltas(dc, person):
     return row("deltas", "pass", "All %d Behavioral-silent delta(s) (of %d in the catalog) have their site's file named by a test in the working copy.%s" % (len(dc["covered"]), dc["parsed"], extra))
 
 
-def check_same(ctx, subject, paths, dev, dev_problem, base, evidence, caveats):
+def check_same(ctx, subject, paths, dev, dev_problem, base, evidence, caveats, gui_split=False, g=None, rules_state=None):
     """Check 3. `base` is baseline_state's answer for an uplift, else None."""
     uplift, dev_state, dev_detail = subject["track"] == "uplift", None, ""
     if dev:
@@ -657,6 +689,14 @@ def check_same(ctx, subject, paths, dev, dev_problem, base, evidence, caveats):
         return row("same", dev_state, dev_detail)
     if os.path.isfile(os.path.join(ctx["adir"], "EQUIVALENCE.json")):
         return row("same", "gap", "EQUIVALENCE.json exists, but the cases behind it (equivalence/cases.json) were not found, so it could not be judged again.")
+    if gui_split:
+        mapped = gui_split_mapping_present(subject)
+        if not mapped:
+            return row("same", "gap", "GUI-split mode without equivalence/cases.json requires a GUI Workflow & Split Mapping table in TRANSFORMATION_NOTES.md linking legacy Form controls/events to React components and Spring Boot endpoints.")
+        if not g or not g.get("dualStackVerified") or g.get("failed") or rules_state != "pass":
+            return row("same", "gap", "GUI-split behavioral equivalence requires passing backend + frontend result files and 100% P0 rule coverage (including UI-State/UI-Flow rules).")
+        evidence["guiSplitEquivalence"] = {"executedTests": g["executed"], "suites": len(g["suites"]), "mappingVerified": True}
+        return row("same", "pass", "GUI-split equivalence: %d backend and frontend characterization/workflow test(s) executed and passed from result files, and the GUI-to-Web/API workflow mapping is recorded in TRANSFORMATION_NOTES.md." % g["executed"])
     return row("same", "gap", "No equivalence cases were recorded: the new code was never compared with the legacy output.")
 
 
@@ -668,11 +708,18 @@ def input_labels(path):
     return {clean(c.get("id"), 80): clean(c.get("input"), 80) for c in cases[:100000] if isinstance(c, dict) and isinstance(c.get("input"), str) and c.get("input").strip()}
 
 
-def check_fresh(ctx, paths, dev, legacy_ran, frs, fr_problem, evidence):
+def check_fresh(ctx, paths, dev, legacy_ran, frs, fr_problem, evidence, gui_split=False, passed_test_ids=None):
     """Check 4."""
     legacy = ctx["runs"]["legacy"]
     if ctx["runs"]["leftOut"]:
         evidence["leftOut"] = ctx["runs"]["leftOut"]
+    if gui_split and frs is None:
+        pids = passed_test_ids or set()
+        edge_named = sum(1 for tid in pids if GUI_EDGE_RE.search(tid))
+        evidence["guiSplitFresh"] = {"edgeAndWorkflowTests": edge_named, "totalPassedTests": len(pids), "needed": FRESH_MIN}
+        if edge_named < FRESH_MIN:
+            return row("fresh", "gap", "GUI-split mode: only %d boundary/edge/negative/UI-workflow test(s) counted in the parsed result files; at least %d are needed when legacy is a desktop GUI." % (edge_named, FRESH_MIN))
+        return row("fresh", "pass", "GUI-split mode: %d boundary, negative, and UI-workflow edge test(s) ran and passed in the parsed backend and frontend result files (at least %d needed)." % (edge_named, FRESH_MIN))
     if not legacy_ran:
         return row("fresh", "gap", "The legacy could not run here%s, so the proof is trace-based: no fresh-input comparison was possible and the verdict cannot be PROVEN." % (" (%s)" % legacy["why"] if legacy["why"] else ""))
     if frs is None:
@@ -788,9 +835,10 @@ def not_proven(subject, ev, legacy_ran):
 def evaluate(subject, ctx):
     """-> the module record: verdict, reasons, the six checks and the evidence behind each."""
     ws, module, uplift = ctx["workspace"], subject["name"], subject["track"] == "uplift"
+    gui_split = is_gui_split(ctx, subject)
     suites = suites_for(ctx["runs"], subject, ctx["unit"], ctx["subjects"])
     evidence, caveats, person = {}, [], []
-    per, xml_paths, oldest, clean_ids = [], [], None, set()
+    per, xml_paths, oldest, clean_ids, passed_ids = [], [], None, set(), set()
     for s in suites:
         ev, fresh = suite_results(ctx, s)
         per.append(ev)
@@ -800,8 +848,11 @@ def evaluate(subject, ctx):
         if fresh:
             xml_paths += [p for p in (inside(ws, j) for j in s["junit"]) if p]
             clean_ids |= {t for t, st in fresh["tests"].items() if st in ("FAIL", "ERROR")}
+            passed_ids |= {t for t, st in fresh["tests"].items() if st == "PASS"}
     g = {k: sum(e[k] for e in per) for k in ("executed", "failed", "skipped", "skippedNoReason")}
-    g.update({"suites": per, "stale": oldest is not None and code_mtime(subject["path"]) > oldest + 2})       # any result file older than the code: not a clean run
+    rf_suites = [e for e in per if e["source"] == "result files" and e["executed"] > 0]
+    dual_verified = len(rf_suites) >= 2 or sum(e["files"] for e in rf_suites) >= 2
+    g.update({"suites": per, "stale": oldest is not None and code_mtime(subject["path"]) > oldest + 2, "dualStackVerified": dual_verified})       # any result file older than the code: not a clean run
     evidence["tests"] = dict({k: g[k] for k in ("executed", "failed", "skipped", "skippedNoReason", "stale")},
                              suites=[{k: e.get(k, "") for k in ("name", "command", "date", "note", "source", "files", "written", "executed", "failed", "skipped")} for e in per][:20])
     binfo, bmeasured = baseline_info(ctx) if uplift else (None, None)
@@ -814,9 +865,13 @@ def evaluate(subject, ctx):
         legacy_ran = False
     if legacy_ran is None:
         legacy_ran = bool(frs and frs["totals"]["executed"])
-    evidence["legacy"] = dict(ctx["runs"]["legacy"], ran=legacy_ran)
-    checks = [check_tests(g, uplift, bool(base and base[2])), check_rules(ctx, subject, evidence, caveats), check_same(ctx, subject, paths, dev, dev_problem, base, evidence, caveats),
-              check_fresh(ctx, paths, dev, legacy_ran, frs, fr_problem, evidence), check_canary(subject, module, ctx["runs"], evidence, ws, {x["name"].lower() for x in ctx["subjects"] if x["track"] != "uplift"}, clean_ids, g["failed"]), check_source(ctx)]
+    evidence["legacy"] = dict(ctx["runs"]["legacy"], ran=legacy_ran, guiSplit=gui_split)
+    c_tests = check_tests(g, uplift, bool(base and base[2]), gui_split)
+    c_rules = check_rules(ctx, subject, evidence, caveats, gui_split)
+    c_same = check_same(ctx, subject, paths, dev, dev_problem, base, evidence, caveats, gui_split, g, c_rules["state"])
+    c_fresh = check_fresh(ctx, paths, dev, legacy_ran, frs, fr_problem, evidence, gui_split, passed_ids)
+    checks = [c_tests, c_rules, c_same, c_fresh,
+              check_canary(subject, module, ctx["runs"], evidence, ws, {x["name"].lower() for x in ctx["subjects"] if x["track"] != "uplift"}, clean_ids, g["failed"]), check_source(ctx)]
     if uplift:
         legacy_root = os.path.realpath(os.path.join(ws, "legacy", ctx["system"])) if os.path.lexists(os.path.join(ws, "legacy", ctx["system"])) else ""
         evidence["testsChanged"] = uplift_checks.tests_changed(legacy_root, subject["path"])

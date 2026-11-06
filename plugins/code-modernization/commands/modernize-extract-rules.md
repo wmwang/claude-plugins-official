@@ -103,7 +103,7 @@ Then go to **Finish**. Without the Workflow tool, use Method B.
 
 ## Method B — Direct subagents (fallback)
 
-Spawn **three business-rules-extractor subagents in parallel**, one lens each (add "focusing
+Spawn **four business-rules-extractor subagents in parallel**, one lens each (add "focusing
 on files matching $module_pattern" if a pattern was given):
 
 1. **Calculations** — "Find every formula, rate, threshold and computed value in legacy/$system: what
@@ -112,6 +112,7 @@ on files matching $module_pattern" if a pattern was given):
    legacy/$system: what is checked, what happens on pass and fail, where (file:line)."
 3. **State and lifecycle** — "Find every status field, state machine and lifecycle transition
    in legacy/$system: the states, what triggers transitions, what side effects fire."
+4. **GUI state and operator workflow** (when the codebase has GUI / form files such as WinForms `.cs` + `.Designer.cs`, WPF `.xaml`, VB.NET `.frm`, or WebForms `.aspx`) — "Find every functional screen state (`UI-State`: initial control states on load, dynamic field reactivity where changing one control enables, disables, hides, clears, or recalculates others) and step-by-step operator workflow (`UI-Flow`: event handler sequences, MessageBox/dialog confirmation branches, modal sub-form calls via ShowDialog, and how screen actions map to frontend React state and backend API endpoints). Skip pure visual layout (pixel coordinates, colors, fonts)."
 
 Merge and de-duplicate, then **verify before you write**: read each cited line and confirm the
 code implements the rule; drop (and note) any rule supported only by a comment or string.
@@ -121,8 +122,10 @@ them, location) in this format:
 
 ```
 ### RULE-NNN: <plain-English name>
-**Category:** Calculation | Validation | Lifecycle | Policy
+**Category:** Calculation | Validation | Lifecycle | Policy | UI-State | UI-Flow
 **Priority:** P0 | P1 | P2
+**Target layer:** Backend | Frontend | Full-Stack   (optional, for GUI-to-Web/API splits)
+**UI mapping:** <Form.Control / Event> -> <React Component/State> -> <Spring Boot API>   (optional, for GUI rules)
 **Source:** `path/to/file.ext:line-line`   (ONE range, path relative to legacy/$system)
 **Plain English:** One sentence a business analyst would recognize.
 **Specification:**
